@@ -6,28 +6,37 @@
 
 ## 目录
 
-1. [基础概念](#1-基础概念)
-2. [安装与连接](#2-安装与连接)
-3. [索引管理](#3-索引管理)
-4. [文档 CRUD](#4-文档-crud)
-5. [搜索详解](#5-搜索详解)
-6. [中文分词](#6-中文分词)
-7. [聚合分析](#7-聚合分析)
-8. [高亮与建议词](#8-高亮与建议词)
-9. [相似度与推荐](#9-相似度与推荐)
-10. [地理位置搜索](#10-地理位置搜索)
-11. [自动补全](#11-自动补全)
-12. [批量操作与性能](#12-批量操作与性能)
-13. [实战：电商搜索](#13-实战电商搜索)
-14. [运维与调优](#14-运维与调优)
+1. [核心概念深入](#1-核心概念深入)
+2. [分布式部署](#2-分布式部署)
+3. [安装与连接](#3-安装与连接)
+4. [索引管理](#4-索引管理)
+5. [文档 CRUD](#5-文档-crud)
+6. [搜索详解](#6-搜索详解)
+7. [中文分词](#7-中文分词)
+8. [聚合分析](#8-聚合分析)
+9. [高亮与建议词](#9-高亮与建议词)
+10. [相似度与推荐](#10-相似度与推荐)
+11. [地理位置搜索](#11-地理位置搜索)
+12. [自动补全](#12-自动补全)
+13. [批量操作与性能](#13-批量操作与性能)
+14. [实战：电商搜索](#14-实战电商搜索)
+15. [运维与调优](#15-运维与调优)
 
 ---
 
-## 1. 基础概念
+## 1. 核心概念深入
+
+### 1.1 Elasticsearch 是什么
 
 ```
-Elasticsearch 是什么：
-  一个基于 Lucene 的分布式搜索和分析引擎。
+Elasticsearch 是一个基于 Lucene 的分布式搜索和分析引擎。
+由 Elastic 公司开发，Java 编写，通过 RESTful API 操作。
+
+核心能力：
+- 全文搜索（分词、相关性评分）
+- 实时数据分析（聚合）
+- 分布式存储（自动分片、故障转移）
+- 近实时搜索（1秒内可查）
 
 核心概念对应：
   MySQL       →  Elasticsearch
@@ -45,9 +54,501 @@ Elasticsearch 是什么：
   DELETE      →  DELETE /index/_doc/{id}
 ```
 
+### 1.2 文档（Document）
+
+```
+文档是 ES 的最小数据单元，相当于 MySQL 的一行记录。
+JSON 格式，包含一个或多个字段。
+
+例：
+{
+  "id": 1001,
+  "title": "PHP操作Elasticsearch",
+  "content": "本文详细介绍...",
+  "tags": ["php", "elasticsearch"],
+  "created_at": "2026-01-15 10:00:00"
+}
+
+特性：
+- 每个文档有唯一 _id（可自动生成或指定）
+- 文档是不可变的（update 实际是 delete + insert）
+- 文档被索引后，约 1 秒后可搜索（refresh_interval 控制）
+```
+
+### 1.3 索引（Index）
+
+```
+索引是文档的集合，相当于 MySQL 的一张表。
+
+一个 ES Cluster 可以有多个 Index，一个 Index 可以有多个 Type（7.x 已废弃，8.x 彻底移除）
+
+Index 包含：
+┌─────────────────────────────┐
+│  Index: articles            │
+├─────────────────────────────┤
+│  Settings（配置）             │
+│  ├─ 分片数                   │
+│  ├─ 副本数                   │
+│  ├─ 分词器                   │
+│  └─ refresh 间隔             │
+├─────────────────────────────┤
+│  Mappings（映射 = Schema）    │
+│  ├─ title: text + keyword   │
+│  ├─ content: text           │
+│  ├─ view_count: integer     │
+│  └─ created_at: date        │
+├─────────────────────────────┤
+│  Documents（数据）            │
+│  ├─ Doc 1                   │
+│  ├─ Doc 2                   │
+│  └─ ...                     │
+└─────────────────────────────┘
+
+Index 命名限制：
+- 只能小写字母
+- 不能以 _ 或 - 开头
+- 不能包含空格和特殊字符
+```
+
+### 1.4 分片（Shard）
+
+```
+分片是索引的物理存储单元。一个 Index 的数据分布在多个 Shard 上。
+
+为什么需要分片：
+1. 水平扩展：单节点装不下所有数据
+2. 并行查询：多个分片可以同时搜索，提速
+3. 写入并发：多分片并行写入
+
+分片类型：
+┌────────────────────────────────────────┐
+│          Index: articles               │
+│          (3 primary shards)            │
+├──────────┬──────────┬─────────────────┤
+│ Shard P0 │ Shard P1 │    Shard P2     │
+│ 主分片0  │ 主分片1  │    主分片2      │
+│ 文档 0-3 │ 文档 4-7 │    文档 8-11    │
+└──────────┴──────────┴─────────────────┘
+
+Primary Shard（主分片）：
+- 每个文档只存在一个主分片上
+- 写操作先写主分片
+- 数量在创建 Index 时确定，不可修改
+- 默认 1 个（7.x），可设置 number_of_shards
+
+Replica Shard（副本分片）：
+- 主分片的拷贝
+- 提供数据冗余（容灾）
+- 可以处理读请求（提高查询吞吐）
+- 数量可在运行时修改
+
+常见配置：
+3 个节点 + 3 主分片 + 1 副本 = 每个节点 2 个分片（1主+1副）
+```
+
+### 1.5 分片路由算法
+
+```
+文档分配到哪个分片？
+
+shard = hash(_routing) % number_of_primary_shards
+
+默认 _routing = _id（即文档ID）
+
+例：3个主分片
+文档ID=1001 → hash("1001") % 3 = 0 → Shard P0
+文档ID=1002 → hash("1002") % 3 = 1 → Shard P1
+文档ID=1003 → hash("1003") % 3 = 2 → Shard P2
+
+也可以指定 routing（同一 routing 的文档分到同一分片）：
+PUT /articles/_doc/1001?routing=user_123
+→ 同一用户的所有文章都在同一分片
+
+⚠️ 分片数不可修改的原因：
+如果分片数从 3 改为 5，hash % 3 ≠ hash % 5，数据全乱
+```
+
+### 1.6 副本（Replica）
+
+```
+副本 = 主分片的完整拷贝，提供容灾和查询负载分担。
+
+┌──────────────────────────────────────────────┐
+│              3节点集群                         │
+├──────────────┬──────────────┬────────────────┤
+│   Node 1     │    Node 2    │    Node 3      │
+├──────────────┼──────────────┼────────────────┤
+│  P0 文档0-3  │  P1 文档4-7  │  P2 文档8-11   │
+│  R2 文档8-11 │  R0 文档0-3  │  R1 文档4-7    │
+└──────────────┴──────────────┴────────────────┘
+
+特性：
+- 主副永不在同一节点（否则宕机全丢）
+- 副本跟随主分片同步（主分片写入 → 副本同步）
+- 读请求可以走副本（增加读吞吐）
+- 写请求只能走主分片
+- 副本数 >= 节点数 - 1 才有意义
+
+副本数选择：
+- 0：无容灾（单节点，开发环境）
+- 1：1份副本（生产最低配置，数据有备份）
+- 2：2份副本（高要求场景，可承受2个节点宕机）
+```
+
+### 1.7 节点（Node）
+
+```
+一个 ES 实例 = 一个节点
+
+节点角色（可兼任）：
+- Master Node（主节点）：管理集群、分配分片、跟踪节点状态
+- Data Node（数据节点）：存储数据、执行搜索和聚合
+  可细分：hot（热/SSD）、warm（温/HDD）、cold（冷/归档）
+- Ingest Node（摄取节点）：数据写入前的预处理（Pipeline）
+- Coordinating Node（协调节点）：接收请求→转发→汇总（每个节点默认都有）
+- ML Node（机器学习，8.0+）：异常检测、预测
+
+最佳实践：
+- 小集群（3-5节点）：master + data 混合
+- 中集群（10+节点）：独立 master 节点（3个专用防止脑裂）
+- 大集群（30+节点）：全角色分离
+```
+
+### 1.8 集群（Cluster）
+
+```
+多个节点组成一个集群，共同存储全部数据并提供搜索。
+
+集群发现：
+- 配置 cluster.name 相同
+- 通过 discovery.seed_hosts 列表互相发现
+- 选举出一个 Master 节点
+
+脑裂（Split Brain）：
+  网络分区导致集群分裂 → 各自选举 Master → 数据不一致
+  防止：cluster.initial_master_nodes 预先定义候选节点
+```
+
+### 1.9 为什么 ES 搜索快
+
+```
+倒排索引（Inverted Index）：
+
+正排索引（MySQL）：扫描所有文档
+倒排索引（ES）：词→文档的映射，O(1)查找
+
+  php           → [Doc1, Doc3]
+  elasticsearch → [Doc1]
+  redis         → [Doc2, Doc3]
+  缓存          → [Doc2, Doc3]
+  指南          → [Doc1, Doc2]
+
+  查"php redis" → 取交集 Doc1 + Doc3 相交 → Doc3！
+
+加分项：
+- Lucene 跳表（Skip List）加速 AND/OR 操作
+- DocValues（列式存储）加速排序和聚合
+- 所有数据在内存映射文件中，利用 OS Page Cache
+- segment 不可变，不需要事务锁
+```
+
+### 1.10 近实时原理
+
+```
+写入流程：
+1. Document 写入内存 Buffer（此时不可搜索）
+2. 同时写入 Translog（事务日志，防数据丢失）
+3. refresh：Buffer 写入 Segment（默认每1秒）→ 可搜索！
+4. flush：Segment 持久化到磁盘 + 清空 Translog（每30分钟或满时）
+
+           Client
+             │
+    ┌────────▼────────┐
+    │   Memory Buffer  │  ← 写入
+    └────────┬────────┘
+             │  refresh（1秒）← 变可搜索
+    ┌────────▼────────┐
+    │    Segment       │  ← OS Page Cache
+    └────────┬────────┘
+             │  flush（30分钟）← 持久化
+    ┌────────▼────────┐
+    │     磁盘          │
+    └─────────────────┘
+
+          Translog（每次写都fsync）
+    ┌─────────────────┐
+    │ 写操作日志       │  ← 崩溃恢复用
+    └─────────────────┘
+```
+
 ---
 
-## 2. 安装与连接
+## 2. 分布式部署
+
+### 2.1 架构规划
+
+```
+生产环境推荐：
+
+方案A：3节点小集群（10-50GB 数据量）
+  Node 1: master+data, 8C 32G, SSD 500G
+  Node 2: master+data, 8C 32G, SSD 500G
+  Node 3: master+data, 8C 32G, SSD 500G
+
+方案B：5节点中集群（100GB+ 数据量）
+  Master 1-3: 仅主节点, 4C 8G
+  Data 1-2:   仅数据, 16C 64G, SSD 1TB
+
+方案C：冷热分离架构
+  Hot Nodes: 16C 64G, SSD 1TB（近30天索引）
+  Warm Nodes: 8C 32G, HDD 4TB（30-90天索引）
+```
+
+### 2.2 安装配置
+
+```bash
+# ═══ 每个节点都要做 ═══
+
+# 系统调优
+# /etc/sysctl.conf
+vm.max_map_count = 262144
+vm.swappiness = 1
+
+# /etc/security/limits.conf
+elasticsearch  soft  nofile  65536
+elasticsearch  hard  nofile  65536
+elasticsearch  soft  memlock unlimited
+
+sysctl -p
+
+# Docker 安装（推荐）
+docker run -d \
+  --name es-node1 \
+  --net es-net \
+  -p 9200:9200 -p 9300:9300 \
+  -e "cluster.name=my-es-cluster" \
+  -e "node.name=node-1" \
+  -e "network.publish_host=<节点IP>" \
+  -e "discovery.seed_hosts=node-1,node-2,node-3" \
+  -e "cluster.initial_master_nodes=node-1,node-2,node-3" \
+  -e "ES_JAVA_OPTS=-Xms16g -Xmx16g" \
+  -e "xpack.security.enabled=true" \
+  -e "ELASTIC_PASSWORD=your_password" \
+  -v es-data1:/usr/share/elasticsearch/data \
+  elasticsearch:8.0.0
+```
+
+### 2.3 elasticsearch.yml 完整配置
+
+```yaml
+# ═══ 集群 ═══
+cluster.name: my-es-cluster
+node.name: node-1
+
+# ═══ 节点角色 ═══
+# 默认所有角色: [master, data, ingest, ml]
+# 专用master: [master]
+# 专用data: [data]
+# 冷热标记: node.attr.box_type: hot | warm
+
+# ═══ 网络 ═══
+network.host: 0.0.0.0
+network.publish_host: 192.168.1.101
+http.port: 9200
+transport.port: 9300
+
+# ═══ 发现 ═══
+discovery.seed_hosts:
+  - 192.168.1.101:9300
+  - 192.168.1.102:9300
+  - 192.168.1.103:9300
+cluster.initial_master_nodes:
+  - node-1
+  - node-2
+  - node-3
+
+# ═══ 安全 ═══
+xpack.security.enabled: true
+xpack.security.transport.ssl.enabled: true
+
+# ═══ 内存（通过 ES_JAVA_OPTS 设置） ═══
+# -Xms16g -Xmx16g  (堆 ≤ 31GB，总内存的 50%)
+```
+
+### 2.4 冷热分离 + ILM（索引生命周期）
+
+```
+ILM 自动管理索引的整个生命周期：
+
+Hot（热）→ Warm（温）→ Cold（冷）→ Delete（删）
+```
+
+```php
+// 创建 ILM 策略
+$es->ilm()->putLifecycle([
+    'policy' => 'logs_policy',
+    'body'   => [
+        'policy' => [
+            'phases' => [
+                'hot' => [
+                    'min_age' => '0ms',
+                    'actions' => [
+                        'rollover' => [
+                            'max_size'  => '50GB',
+                            'max_age'   => '30d',
+                            'max_docs'  => 100000000,
+                        ],
+                    ],
+                ],
+                'warm' => [
+                    'min_age' => '7d',
+                    'actions' => [
+                        'shrink'   => ['number_of_shards' => 1],
+                        'forcemerge' => ['max_num_segments' => 1],
+                        'allocate'  => ['require' => ['box_type' => 'warm']],
+                    ],
+                ],
+                'cold' => [
+                    'min_age' => '30d',
+                    'actions' => [
+                        'allocate' => ['require' => ['box_type' => 'cold']],
+                        'freeze'   => new \stdClass(),
+                    ],
+                ],
+                'delete' => [
+                    'min_age' => '90d',
+                    'actions' => [
+                        'delete' => new \stdClass(),
+                    ],
+                ],
+            ],
+        ],
+    ],
+]);
+
+// 绑定到索引模板
+$es->indices()->putTemplate([
+    'name' => 'logs_ilm_template',
+    'index_patterns' => ['logs-*'],
+    'body' => [
+        'settings' => [
+            'index.lifecycle.name' => 'logs_policy',
+            'index.lifecycle.rollover_alias' => 'logs',
+        ],
+    ],
+]);
+```
+
+### 2.5 Docker Compose 一键部署
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+    container_name: es01
+    environment:
+      - node.name=es01
+      - cluster.name=es-cluster
+      - discovery.seed_hosts=es02,es03
+      - cluster.initial_master_nodes=es01,es02,es03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes:
+      - es_data01:/usr/share/elasticsearch/data
+    ports:
+      - 9200:9200
+    networks:
+      - es_net
+
+  es02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+    container_name: es02
+    environment:
+      - node.name=es02
+      - cluster.name=es-cluster
+      - discovery.seed_hosts=es01,es03
+      - cluster.initial_master_nodes=es01,es02,es03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes:
+      - es_data02:/usr/share/elasticsearch/data
+    networks:
+      - es_net
+
+  es03:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+    container_name: es03
+    environment:
+      - node.name=es03
+      - cluster.name=es-cluster
+      - discovery.seed_hosts=es01,es02
+      - cluster.initial_master_nodes=es01,es02,es03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - xpack.security.enabled=false
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes:
+      - es_data03:/usr/share/elasticsearch/data
+    networks:
+      - es_net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.0.0
+    container_name: kibana
+    ports:
+      - 5601:5601
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://es01:9200","http://es02:9200","http://es03:9200"]'
+    networks:
+      - es_net
+
+volumes:
+  es_data01:
+  es_data02:
+  es_data03:
+
+networks:
+  es_net:
+    driver: bridge
+
+# 启动：docker-compose up -d
+# 检查：curl http://localhost:9200/_cluster/health?pretty
+```
+
+### 2.6 扩容操作
+
+```bash
+# ═══ 添加新节点 ═══
+# 1. 新机器装 ES，配置相同 cluster.name + discovery.seed_hosts
+# 2. 启动 → 自动加入集群 → 分片自动重平衡
+
+# ═══ 下线节点 ═══
+# 先让分片迁移走
+curl -X PUT "localhost:9200/_cluster/settings" -H 'Content-Type: application/json' -d'
+{
+  "transient": {
+    "cluster.routing.allocation.exclude._name": "node-3"
+  }
+}
+'
+# 观察迁移完成后关停
+
+# ═══ 查看分片分配 ═══
+curl "localhost:9200/_cat/shards/articles?v&s=shard"
+```
+
+---
+
+## 3. 安装与连接
 
 ```bash
 composer require elasticsearch/elasticsearch
@@ -79,7 +580,7 @@ $es = ESFactory::get();
 
 ---
 
-## 3. 索引管理
+## 4. 索引管理
 
 ### 3.1 创建索引（带 Mapping + 分词器）
 
@@ -222,7 +723,7 @@ $es->cat()->indices(['v' => true, 's' => 'store.size:desc']);
 
 ---
 
-## 4. 文档 CRUD
+## 5. 文档 CRUD
 
 ```php
 $es = ESFactory::get();
@@ -306,7 +807,7 @@ $es->update([
 
 ---
 
-## 5. 搜索详解
+## 6. 搜索详解
 
 ### 5.1 基础查询
 
@@ -526,7 +1027,7 @@ foreach ($result['hits']['hits'] as $hit) {
 
 ---
 
-## 6. 中文分词
+## 7. 中文分词
 
 ### 6.1 IK 分词器
 
@@ -650,7 +1151,7 @@ $es->indices()->create([
 
 ---
 
-## 7. 聚合分析
+## 8. 聚合分析
 
 ### 7.1 分组统计
 
@@ -774,7 +1275,7 @@ $es->search([
 
 ---
 
-## 8. 高亮与建议词
+## 9. 高亮与建议词
 
 ### 8.1 高亮
 
@@ -899,7 +1400,7 @@ final class SmartSearchService
 
 ---
 
-## 9. 相似度与推荐
+## 10. 相似度与推荐
 
 ### 9.1 more_like_this（相似内容）
 
@@ -1134,7 +1635,7 @@ $es->search([
 
 ---
 
-## 10. 地理位置搜索
+## 11. 地理位置搜索
 
 ```php
 // ═══ 创建含坐标的文档 ═══
@@ -1198,7 +1699,7 @@ $es->search([
 
 ---
 
-## 11. 自动补全
+## 12. 自动补全
 
 ### 11.1 Completion Suggester
 
@@ -1327,7 +1828,7 @@ $es->search([
 
 ---
 
-## 12. 批量操作与性能
+## 13. 批量操作与性能
 
 ### 12.1 Bulk API
 
@@ -1473,7 +1974,7 @@ if (count($hits) > 0) {
 
 ---
 
-## 13. 实战：电商搜索
+## 14. 实战：电商搜索
 
 ```php
 /**
@@ -1667,7 +2168,7 @@ final class ProductSearchService
 
 ---
 
-## 14. 运维与调优
+## 15. 运维与调优
 
 ### 14.1 集群健康
 
