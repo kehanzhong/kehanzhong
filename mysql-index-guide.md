@@ -18,8 +18,10 @@
 10. [慢查询定位与优化](#10-慢查询定位与优化)
 11. [索引失效场景全集](#11-索引失效场景全集)
 12. [大表索引策略](#12-大表索引策略)
-13. [全文索引](#13-全文索引)
-14. [索引与锁](#14-索引与锁)
+13. [主从复制与读写分离](#13-主从复制与读写分离)
+14. [分库分表](#14-分库分表)
+15. [全文索引](#15-全文索引)
+16. [索引与锁](#16-索引与锁)
 
 ---
 
@@ -1040,7 +1042,858 @@ ALTER TABLE orders TRUNCATE PARTITION p202601;  -- 秒删
 
 ---
 
-## 13. 全文索引
+## 13. 主从复制与读写分离
+
+### 13.1 主从架构
+
+```
+                   ┌─────────────┐
+             ┌─────│  Master (主) │─────┐
+             │     │  写操作      │     │
+             │     └─────────────┘     │
+             │   binlog 复制            │
+             ▼                         ▼
+      ┌─────────────┐         ┌─────────────┐
+      │ Slave 1 (从) │         │ Slave 2 (从) │
+      │  只读/报表    │         │  只读/备份   │
+      └─────────────┘         └─────────────┘
+
+数据流：Master 写 → binlog → I/O 线程拉取 → SQL 线程重放 → Slave
+
+主从延迟来源：
+- 网络传输 binlog
+- Slave 单线程回放（5.6-）
+- 大事务
+- Slave 机器性能差
+```
+
+### 13.2 配置主从
+
+```bash
+# ═══ Master my.cnf ═══
+[mysqld]
+server-id = 1
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_format = ROW            # 推荐 ROW（不易丢数据）
+binlog_row_image = MINIMAL     # 减少 binlog 大小
+expire_logs_days = 7
+gtid_mode = ON                 # 8.0 推荐 GTID
+enforce_gtid_consistency = ON
+
+# ═══ Slave my.cnf ═══
+[mysqld]
+server-id = 2
+relay_log = /var/log/mysql/relay-bin.log
+gtid_mode = ON
+enforce_gtid_consistency = ON
+read_only = ON                 # 从库只读
+log_slave_updates = ON         # 级联复制时需要
+
+# ═══ 在 Master 创建复制用户 ═══
+CREATE USER 'repl'@'%' IDENTIFIED BY 'password';
+GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';
+FLUSH PRIVILEGES;
+
+# ═══ 在 Slave 执行 ═══
+CHANGE MASTER TO
+    MASTER_HOST = '192.168.1.100',
+    MASTER_PORT = 3306,
+    MASTER_USER = 'repl',
+    MASTER_PASSWORD = 'password',
+    MASTER_AUTO_POSITION = 1;   -- GTID 模式
+
+START SLAVE;
+SHOW SLAVE STATUS\G
+-- 关注：Slave_IO_Running 和 Slave_SQL_Running 都是 Yes
+-- Seconds_Behind_Master 主从延迟秒数
+```
+
+### 13.3 主从延迟处理
+
+```sql
+-- 查看延迟
+SHOW SLAVE STATUS\G
+-- Seconds_Behind_Master: 0 表示无延迟
+
+-- 延迟原因排查
+-- 1. 大事务（几万行 UPDATE/DELETE）
+-- 2. 批量操作没分批
+-- 3. 从库硬件差
+-- 4. 从库同时做报表查询
+
+-- ✅ 减小延迟
+-- 并行复制（5.7+）
+SET GLOBAL slave_parallel_type = 'LOGICAL_CLOCK';
+SET GLOBAL slave_parallel_workers = 4;  -- 4 个并行线程
+
+-- 拆分大事务为小事务
+-- ❌ 一次更新 100 万行
+UPDATE orders SET status = 'archived' WHERE id BETWEEN 1 AND 1000000;
+
+-- ✅ 分批执行
+UPDATE orders SET status = 'archived' WHERE id BETWEEN 1 AND 10000;
+UPDATE orders SET status = 'archived' WHERE id BETWEEN 10001 AND 20000;
+-- ... 循环执行
+```
+
+### 13.4 PHP 读写分离
+
+```php
+/**
+ * 简单的读写分离实现
+ */
+final class ReadWriteConnection
+{
+    private array $readConnections;  // 从库连接池
+    private int $readIndex = 0;
+
+    public function __construct(
+        private \PDO $writeConnection,
+        array $readConnectionConfigs,
+    ) {
+        foreach ($readConnectionConfigs as $config) {
+            $this->readConnections[] = new \PDO(
+                "mysql:host={$config['host']};dbname={$config['database']}",
+                $config['username'],
+                $config['password'],
+                [
+                    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+                    \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+                ]
+            );
+        }
+    }
+
+    /**
+     * 获取读连接（轮询从库）
+     */
+    public function read(): \PDO
+    {
+        if (empty($this->readConnections)) {
+            return $this->writeConnection;  // 没有从库，恢复写库读
+        }
+
+        $conn = $this->readConnections[$this->readIndex];
+        $this->readIndex = ($this->readIndex + 1) % count($this->readConnections);
+        return $conn;
+    }
+
+    /**
+     * 获取写连接
+     */
+    public function write(): \PDO
+    {
+        return $this->writeConnection;
+    }
+}
+
+// 使用
+$db = new ReadWriteConnection($writePDO, [
+    ['host' => 'slave1', 'database' => 'mydb', 'username' => 'root', 'password' => 'pass'],
+    ['host' => 'slave2', 'database' => 'mydb', 'username' => 'root', 'password' => 'pass'],
+]);
+
+// 读操作用从库
+$stmt = $db->read()->query('SELECT * FROM orders WHERE user_id = 100');
+
+// 写操作用主库，写完立刻读需要指定用主库
+$db->write()->exec("UPDATE orders SET status = 'paid' WHERE id = 123");
+$order = $db->write()->query('SELECT * FROM orders WHERE id = 123');  // 主库读防延迟
+```
+
+### 13.5 Laravel 读写分离
+
+```php
+// config/database.php
+'mysql' => [
+    'read' => [
+        ['host' => '192.168.1.101'],  // slave 1
+        ['host' => '192.168.1.102'],  // slave 2
+    ],
+    'write' => [
+        ['host' => '192.168.1.100'],  // master
+    ],
+    'sticky' => true,  // ⭐ 重要：同一请求周期内，写过就用主库读
+    'driver' => 'mysql',
+    'database' => 'mydb',
+    'username' => 'root',
+    'password' => 'pass',
+    'charset' => 'utf8mb4',
+],
+
+// sticky = true 的行为：
+// 1. 读操作 → 从库
+// 2. 写操作 → 主库
+// 3. 同一请求再读 → 主库（防止主从延迟导致读不到刚写的数据）
+// 4. 下一个请求 → 重新从从库开始
+
+// 手动指定连接
+DB::connection('mysql::write')->select('...');  // 强制主库
+DB::connection('mysql::read')->select('...');   // 强制从库
+```
+
+### 13.6 一主多从 + 延迟从库
+
+```
+架构升级：
+
+                Master (写)
+                  │
+     ┌────────────┼────────────┐
+     ▼            ▼            ▼
+  Slave 1      Slave 2      Slave 3
+  (线上读)     (线上读)     (延迟30分钟备份)
+
+延迟从库用途：
+- 误删数据恢复（有30分钟窗口回滚）
+- 全量备份（不影响线上）
+
+配置延迟：
+CHANGE MASTER TO MASTER_DELAY = 1800;  -- 延迟 30 分钟
+
+误删恢复操作：
+1. 立即 STOP SLAVE（保留数据）
+2. 从延迟从库导出被删数据
+3. 导入主库
+```
+
+### 13.7 半同步复制（防数据丢失）
+
+```sql
+-- 异步复制：Master 提交 → 返回客户端 → 写 binlog → Slave 异步拉取
+--   风险：Master 宕机，binlog 没传到 Slave → 数据丢失
+
+-- 半同步复制：Master 提交 → 写 binlog → 等至少1个 Slave 确认收到 → 返回客户端
+--   性能损失约 20-30%，但数据不丢
+
+-- Master 安装插件
+INSTALL PLUGIN rpl_semi_sync_master SONAME 'semisync_master.so';
+SET GLOBAL rpl_semi_sync_master_enabled = ON;
+SET GLOBAL rpl_semi_sync_master_timeout = 10000;  -- 10秒超时降级为异步
+
+-- Slave 安装插件
+INSTALL PLUGIN rpl_semi_sync_slave SONAME 'semisync_slave.so';
+SET GLOBAL rpl_semi_sync_slave_enabled = ON;
+
+-- 监控
+SHOW STATUS LIKE 'Rpl_semi_sync%';
+```
+
+### 13.8 MHA / Orchestrator（高可用）
+
+```
+故障自动切换：
+
+MHA（Master High Availability）：
+1. 监控 Master 存活
+2. Master 宕机 → 选一个数据最新的 Slave 提升为新 Master
+3. 其他 Slave 指向新 Master
+4. 全过程 10-30 秒
+
+Orchestrator（更现代）：
+- Web UI 可视化管理拓扑
+- 自动故障检测 + 切换
+- 支持中间件 ProxySQL 联动
+
+# 简单自愈脚本思路（非 MHA 的轻量方案）
+# 1. 检测：mysqladmin ping -h master
+# 2. 确认：多次检测都失败
+# 3. 选主：选 Seconds_Behind_Master 最小的 Slave
+# 4. 切换：STOP SLAVE; RESET SLAVE ALL; 其他从库 CHANGE MASTER TO 新主
+# 5. 通知：发告警
+```
+
+---
+
+## 14. 分库分表
+
+### 14.1 什么时候需要分库分表
+
+```
+单个 MySQL 实例的极限：
+- 磁盘：单表 2000 万行开始明显变慢
+- 连接数：单实例约 500-1000 并发连接
+- 写入：单实例约 3000-5000 TPS
+
+分库分表信号：
+✅ 单表数据量 > 2000 万
+✅ 磁盘占用 > 500GB
+✅ 写入瓶颈（TPS 到顶）
+✅ 数据库连接数扛不住
+✅ 单表 ALTER TABLE 要跑几小时
+
+但先尝试这些：
+- 优化索引和 SQL
+- 读写分离
+- 缓存（Redis）
+- 冷热数据分离
+- 分区表
+```
+
+### 14.2 切分策略
+
+#### 垂直分库
+
+```
+拆分前：
+┌─────────────── 单库 ═══════════════┐
+│ users   orders   products   payment │
+│ logs    reports  settings   files   │
+└────────────────────────────────────┘
+
+拆分后：
+┌──── 用户库 ────┐ ┌──── 订单库 ────┐ ┌──── 支付库 ────┐
+│ users          │ │ orders         │ │ payment        │
+│ user_profiles  │ │ order_items    │ │ transactions   │
+│ user_logins    │ │ carts          │ │ refunds        │
+└────────────────┘ └────────────────┘ └────────────────┘
+
+特点：
+- 表结构不同，按业务模块拆分
+- JOIN 不能跨库（需要应用层拼装）
+- 事务不能跨库（需要分布式事务或最终一致性）
+```
+
+#### 水平分表
+
+```
+拆分前：
+orders 单表 1 亿行
+
+拆分后：
+orders_0: user_id % 4 = 0 的数据
+orders_1: user_id % 4 = 1 的数据
+orders_2: user_id % 4 = 2 的数据
+orders_3: user_id % 4 = 3 的数据
+
+特点：
+- 表结构完全相同
+- 单表数据量可控
+- 查询需要知道分片键
+```
+
+### 14.3 分片算法
+
+```php
+/**
+ * 哈希取模（最常用）
+ * 优点：数据分布均匀
+ * 缺点：扩容时要重新哈希（迁移成本高）
+ */
+final class ModSharding
+{
+    private int $shardCount;
+
+    public function __construct(int $shardCount = 4)
+    {
+        $this->shardCount = $shardCount;
+    }
+
+    public function getShard(string $key): int
+    {
+        // CRC32 比 MD5 快得多
+        return abs(crc32($key)) % $this->shardCount;
+    }
+
+    public function getTableName(string $table, string $key): string
+    {
+        return $table . '_' . $this->getShard($key);
+    }
+}
+
+// 使用
+$sharding = new ModSharding(4);
+$table = $sharding->getTableName('orders', 'user:123');
+// → orders_2
+
+$sql = "SELECT * FROM {$table} WHERE user_id = 123";
+```
+
+```php
+/**
+ * 一致性哈希（减少扩容迁移量）
+ * 优点：加节点只影响相邻节点
+ * 缺点：可能数据不均衡（需要虚拟节点）
+ */
+final class ConsistentHash
+{
+    private array $nodes = [];
+    private int $virtualNodes = 150; // 虚拟节点数
+
+    public function addNode(string $node): void
+    {
+        for ($i = 0; $i < $this->virtualNodes; $i++) {
+            $hash = crc32("{$node}#{$i}");
+            $this->nodes[$hash] = $node;
+        }
+        ksort($this->nodes);
+    }
+
+    public function getNode(string $key): string
+    {
+        if (empty($this->nodes)) {
+            throw new \RuntimeException('没有可用节点');
+        }
+
+        $hash = crc32($key);
+
+        // 顺时针找第一个节点
+        foreach ($this->nodes as $nodeHash => $node) {
+            if ($hash <= $nodeHash) return $node;
+        }
+
+        // 没找到 → 回到环的开头
+        return reset($this->nodes);
+    }
+}
+
+// $hash->addNode('db_node_1');
+// $hash->addNode('db_node_2');
+// $node = $hash->getNode('user:123');
+```
+
+```php
+/**
+ * 按时间分片
+ * 适合：日志、流水、时序数据
+ * 优点：天然按时间查询裁剪，扩容简单
+ * 缺点：写入热点（最新分片压力大）
+ */
+final class TimeSharding
+{
+    public function getTableName(string $base, \DateTimeInterface $time): string
+    {
+        return $base . '_' . $time->format('Ym');  // orders_202601
+    }
+
+    public function getTableNames(string $base, string $start, string $end): array
+    {
+        // 跨月查询需要 UNION ALL
+        $tables = [];
+        $start = new \DateTime($start);
+        $end = new \DateTime($end);
+
+        while ($start <= $end) {
+            $tables[] = $base . '_' . $start->format('Ym');
+            $start->modify('first day of next month');
+        }
+
+        return $tables;
+    }
+}
+
+// $tables = $sharding->getTableNames('orders', '2026-01-15', '2026-03-20');
+// → ['orders_202601', 'orders_202602', 'orders_202603']
+// 拼接：SELECT * FROM orders_202601
+//       UNION ALL SELECT * FROM orders_202602
+//       UNION ALL SELECT * FROM orders_202603
+```
+
+### 14.4 分片键选择
+
+```
+分片键 = 大部分查询 WHERE 条件里都带的那个字段
+
+例如订单系统：
+  - 分片键选 user_id（因为大部分查询是「我的订单」）
+  - 但偶尔要按 order_id 查 → 需要路由表或全分片查询
+
+选分片键的原则：
+1. ⭐ 最高频的查询条件
+2. 数据分布均匀（避免热点分片）
+3. 尽量避免跨分片查询
+
+常见分片键：
+- 用户系统 → user_id
+- 订单系统 → user_id（C 端）/ merchant_id（B 端）
+- 内容系统 → article_id
+- 日志系统 → created_at
+```
+
+### 14.5 跨分片查询
+
+```php
+/**
+ * 处理无法用分片键定位的查询
+ */
+final class CrossShardQuery
+{
+    /**
+     * 按非分片键查询（如按 order_id 查）
+     */
+    public function findByOrderId(string $orderId): ?array
+    {
+        // 方案1：基因法 — order_id 里嵌入 user_id
+        // order_id = 时间戳 + user_id 后4位 + 序列号
+        // 从 order_id 反解出 user_id → 定位分片
+        $userId = $this->extractUserIdFromOrderId($orderId);
+        $shard = $this->sharding->getShard($userId);
+
+        return DB::table("orders_{$shard}")
+            ->where('order_id', $orderId)
+            ->first();
+    }
+
+    /**
+     * 基因法生成 ID
+     */
+    public function generateOrderId(int $userId): string
+    {
+        // 时间毫秒 (13位) + 用户基因 (4位) + 序列号 (4位)
+        $ts = (string) (microtime(true) * 1000);
+        $gene = str_pad($userId % 10000, 4, '0', STR_PAD_LEFT);
+        $seq = str_pad(random_int(0, 9999), 4, '0', STR_PAD_LEFT);
+
+        return $ts . $gene . $seq;
+        // 例: 1683987200000_0023_0456 → 包含 user_id 后4位
+    }
+
+    /**
+     * 全分片遍历（不得已时）
+     */
+    public function findByStatus(string $status): array
+    {
+        $results = [];
+        for ($i = 0; $i < $this->shardCount; $i++) {
+            $rows = DB::table("orders_{$i}")
+                ->where('status', $status)
+                ->limit(100)
+                ->get();
+            $results = array_merge($results, $rows);
+        }
+        return $results;
+    }
+}
+```
+
+### 14.6 分布式 ID 生成
+
+```php
+/**
+ * 雪花算法（Snowflake）— 最常用的分布式 ID 方案
+ *
+ * 64-bit 结构：
+ * ┌────┬───────────────────┬───────────┬──────────┐
+ * │ 1b │    41b 毫秒时间戳   │ 10b 机器ID │ 12b 序号  │
+ * └────┴───────────────────┴───────────┴──────────┘
+ */
+final class SnowflakeId
+{
+    private const EPOCH = 1700000000000;  // 2023-11-14 基准时间
+    private const MACHINE_BITS = 10;
+    private const SEQUENCE_BITS = 12;
+
+    private int $machineId;
+    private int $sequence = 0;
+    private int $lastTimestamp = -1;
+
+    public function __construct(int $machineId)
+    {
+        $maxMachineId = (1 << self::MACHINE_BITS) - 1;
+        if ($machineId < 0 || $machineId > $maxMachineId) {
+            throw new \InvalidArgumentException("机器ID范围：0-{$maxMachineId}");
+        }
+        $this->machineId = $machineId;
+    }
+
+    public function nextId(): int
+    {
+        $timestamp = $this->currentTimeMillis();
+
+        if ($timestamp < $this->lastTimestamp) {
+            throw new \RuntimeException('时钟回拨！');
+        }
+
+        if ($timestamp === $this->lastTimestamp) {
+            $this->sequence = ($this->sequence + 1) & ((1 << self::SEQUENCE_BITS) - 1);
+            if ($this->sequence === 0) {
+                // 序号用完了，等下一毫秒
+                $timestamp = $this->waitNextMillis($this->lastTimestamp);
+            }
+        } else {
+            $this->sequence = 0;
+        }
+
+        $this->lastTimestamp = $timestamp;
+
+        return (($timestamp - self::EPOCH) << (self::MACHINE_BITS + self::SEQUENCE_BITS))
+            | ($this->machineId << self::SEQUENCE_BITS)
+            | $this->sequence;
+    }
+
+    private function currentTimeMillis(): int
+    {
+        return (int) (microtime(true) * 1000);
+    }
+
+    private function waitNextMillis(int $lastTimestamp): int
+    {
+        $timestamp = $this->currentTimeMillis();
+        while ($timestamp <= $lastTimestamp) {
+            $timestamp = $this->currentTimeMillis();
+        }
+        return $timestamp;
+    }
+}
+
+// 使用
+$snowflake = new SnowflakeId(1);  // 机器ID=1
+$orderId = $snowflake->nextId();  // 7062044769984513
+
+// 也可以用 Redis 简单方案
+$redis->incr('global:order_id');  // 原子自增
+
+// 或号段模式（从 DB 批量拿号段减少 DB 压力）
+// 每次从 DB 取 1000 个号，本地消耗完再取
+```
+
+### 14.7 分表后的查询策略
+
+```php
+final class ShardedQueryBuilder
+{
+    /**
+     * 单分片查询（带了分片键）
+     */
+    public function query(string $table, string $shardKey, callable $builder): array
+    {
+        $shard = $this->sharding->getShard($shardKey);
+        $tableName = "{$table}_{$shard}";
+
+        return $builder(DB::table($tableName));
+    }
+
+    /**
+     * 全分片查询（不带分片键，慎用）
+     */
+    public function queryAllShards(string $table, callable $builder, int $limit = 100): array
+    {
+        $allResults = [];
+
+        for ($i = 0; $i < $this->shardCount; $i++) {
+            $tableName = "{$table}_{$i}";
+            $results = $builder(DB::table($tableName))->limit($limit)->get();
+            $allResults = array_merge($allResults, $results->toArray());
+        }
+
+        // 全分片聚合需要应用层排序
+        usort($allResults, fn($a, $b) => $b['created_at'] <=> $a['created_at']);
+
+        return array_slice($allResults, 0, $limit);
+    }
+
+    /**
+     * 全分片 COUNT（需要汇总）
+     */
+    public function count(string $table, string $field = '*'): int
+    {
+        $total = 0;
+        for ($i = 0; $i < $this->shardCount; $i++) {
+            $total += DB::table("{$table}_{$i}")->count($field);
+        }
+        return $total;
+    }
+
+    /**
+     * 跨分片 SUM
+     */
+    public function sum(string $table, string $field): int
+    {
+        $total = 0;
+        for ($i = 0; $i < $this->shardCount; $i++) {
+            $total += DB::table("{$table}_{$i}")->sum($field);
+        }
+        return $total;
+    }
+}
+```
+
+### 14.8 分表后的分页难题
+
+```php
+/**
+ * 分表后 OFFSET/LIMIT 失效，需要特殊处理
+ */
+final class ShardedPagination
+{
+    /**
+     * 全局分页（按时间排序，每页 20 条）
+     *
+     * 思路：
+     *   每个分片取 limit 条 → 应用层归并排序 → 取前 limit 条
+     *   适合前几页
+     *
+     *   深分页用游标（和单表一样）
+     */
+    public function paginate(string $table, int $page, int $limit = 20): array
+    {
+        $perShard = $limit;  // 每个分片取 limit 条
+        $all = [];
+
+        for ($i = 0; $i < $this->shardCount; $i++) {
+            $rows = DB::table("{$table}_{$i}")
+                ->orderBy('created_at', 'desc')
+                ->limit($perShard)
+                ->get()
+                ->toArray();
+            $all = array_merge($all, $rows);
+        }
+
+        // 归并排序
+        usort($all, fn($a, $b) => $b['created_at'] <=> $a['created_at']);
+
+        // 取第 page 页
+        $offset = ($page - 1) * $limit;
+        return array_slice($all, $offset, $limit);
+    }
+
+    /**
+     * 游标分页（推荐）
+     */
+    public function cursorPaginate(string $table, ?string $afterId = null, int $limit = 20): array
+    {
+        $all = [];
+
+        for ($i = 0; $i < $this->shardCount; $i++) {
+            $query = DB::table("{$table}_{$i}")
+                ->orderBy('id', 'desc')
+                ->limit($limit);
+
+            if ($afterId !== null) {
+                $query->where('id', '<', $afterId);
+            }
+
+            $rows = $query->get()->toArray();
+            $all = array_merge($all, $rows);
+        }
+
+        // 归并 + 取前 N 条
+        usort($all, fn($a, $b) => $b['id'] <=> $a['id']);
+        $page = array_slice($all, 0, $limit);
+
+        return [
+            'data'     => $page,
+            'has_more' => count($all) > $limit,
+            'next'     => end($page)['id'] ?? null,
+        ];
+    }
+}
+```
+
+### 14.9 分布式事务
+
+```
+分库后事务不能跨库，解决方案：
+
+方案1：最终一致性（推荐）
+  创建订单流程：
+  1. 订单服务：写 orders 表（分库A，立即提交）
+  2. 发消息「订单创建成功」到 MQ
+  3. 库存服务：消费消息，扣库存（分库B）
+  4. 如果扣库存失败 → 发「回滚消息」→ 订单服务取消订单
+
+方案2：两阶段提交（不推荐，太重）
+  性能差，锁时间长，XA 协议
+
+方案3：TCC（Try-Confirm-Cancel）
+  适合资金类强一致性场景
+
+方案4：本地消息表
+  同一本地事务中：写业务数据 + 写消息表
+  后台定时扫消息表 → 发 MQ → 标记已发送
+```
+
+```php
+// 最终一致性示例
+final class CreateOrderService
+{
+    public function execute(CreateOrderDTO $dto): Order
+    {
+        // 阶段1：创建订单 + 本地消息表（同一事务）
+        DB::transaction(function () use ($dto) {
+            $order = Order::create([
+                'user_id' => $dto->userId,
+                'amount'  => $dto->amount,
+                'status'  => 'pending',
+            ]);
+
+            // 本地消息表
+            OrderEvent::create([
+                'order_id' => $order->id,
+                'event'    => 'order_created',
+                'status'   => 'pending',
+            ]);
+        });
+
+        return $order;
+    }
+}
+
+// 定时任务：扫描未发送的本地消息，投递到 MQ
+// * * * * * php artisan order:dispatch-events
+```
+
+### 14.10 扩容方案
+
+```
+4 分片 → 8 分片（哈希取模的痛点）
+
+方法1：停服迁移（最简单）
+  1. 停机
+  2. 导出所有数据
+  3. 按新规则（%8）重新导入
+  4. 改配置 → 启动
+
+方法2：双写过渡（不停服）
+  1. 新老分片同时写
+  2. 历史数据异步迁移
+  3. 校验数据一致性
+  4. 切读流量到新分片
+  5. 停老分片写
+
+方法3：一致性哈希（换算法）
+  见 14.3 节，扩容只影响部分数据
+
+方法4：预分片
+  初期就建 64 张表，逻辑映射到 4 个库
+  orders_00 ~ orders_15 在 db0
+  orders_16 ~ orders_31 在 db1
+  orders_32 ~ orders_47 在 db2
+  orders_48 ~ orders_63 在 db3
+
+  扩容：迁移部分表到新库即可
+  orders_16 ~ orders_31 从 db1 → db4
+```
+
+### 14.11 分库分表中间件
+
+```
+常见中间件：
+
+ShardingSphere (Apache)：
+  - JDBC 层代理，不依赖额外服务
+  - 支持分库分表、读写分离、分布式事务
+  - Java 生态，PHP 不直接适用
+
+ProxySQL：
+  - 数据库代理层
+  - 读写分离 + 查询路由
+  - PHP 无感知，直接连 ProxySQL
+
+Vitess (CNCF)：
+  - YouTube 出品
+  - 完整的分库分表 + 连接池 + 高可用
+  - 学习成本高
+
+自研：
+  - PHP 应用层路由（如本章示例代码）
+  - 适合分片规则简单的场景
+  - 分片规则复杂时推荐中间件
+```
+
+---
+
+## 15. 全文索引
 
 ### 13.1 基础用法
 
@@ -1081,7 +1934,7 @@ SET GLOBAL ngram_token_size = 2;  -- 两个字符一组
 
 ---
 
-## 14. 索引与锁
+## 16. 索引与锁
 
 ### 14.1 索引影响锁范围
 
