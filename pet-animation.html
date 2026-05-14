@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>可爱宠物动画</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #a8edea 0%, #fed6e3 50%, #d299c2 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Segoe UI', sans-serif;
+    overflow: hidden;
+  }
+
+  .scene {
+    position: relative;
+    width: 400px;
+    height: 400px;
+  }
+
+  /* ===== 地面 ===== */
+  .ground {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 300px;
+    height: 60px;
+    background: linear-gradient(to top, #7cb342, #8bc34a);
+    border-radius: 50% 50% 0 0;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.1);
+  }
+
+  /* ===== 云朵 ===== */
+  .cloud {
+    position: absolute;
+    background: white;
+    border-radius: 50%;
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,0.08));
+    animation: floatCloud 8s ease-in-out infinite;
+  }
+  .cloud::before, .cloud::after {
+    content: '';
+    position: absolute;
+    background: white;
+    border-radius: 50%;
+  }
+  .cloud-1 { width: 80px; height: 30px; top: 30px; left: 20px; animation-delay: 0s; }
+  .cloud-1::before { width: 40px; height: 40px; top: -20px; left: 10px; }
+  .cloud-1::after { width: 50px; height: 50px; top: -25px; left: 30px; }
+  .cloud-2 { width: 60px; height: 24px; top: 60px; right: 30px; animation-delay: -3s; }
+  .cloud-2::before { width: 30px; height: 30px; top: -15px; left: 8px; }
+  .cloud-2::after { width: 40px; height: 40px; top: -20px; left: 22px; }
+
+  @keyframes floatCloud {
+    0%, 100% { transform: translateY(0) translateX(0); }
+    50%      { transform: translateY(-10px) translateX(5px); }
+  }
+
+  /* ===== 太阳 ===== */
+  .sun {
+    position: absolute;
+    top: 20px;
+    right: 30px;
+    width: 70px;
+    height: 70px;
+    background: radial-gradient(circle, #fff9c4, #ffeb3b);
+    border-radius: 50%;
+    box-shadow: 0 0 40px rgba(255, 235, 59, 0.6), 0 0 80px rgba(255, 235, 59, 0.3);
+    animation: sunPulse 3s ease-in-out infinite;
+  }
+  @keyframes sunPulse {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 40px rgba(255, 235, 59, 0.6), 0 0 80px rgba(255, 235, 59, 0.3); }
+    50%      { transform: scale(1.05); box-shadow: 0 0 50px rgba(255, 235, 59, 0.8), 0 0 100px rgba(255, 235, 59, 0.4); }
+  }
+
+  /* ===== 宠物容器 ===== */
+  .pet-container {
+    position: absolute;
+    bottom: 50px;
+    left: 50%;
+    transform: translateX(-50%);
+    animation: petBounce 2s ease-in-out infinite;
+  }
+
+  @keyframes petBounce {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50%      { transform: translateX(-50%) translateY(-15px); }
+  }
+
+  /* ===== 猫咪/狗狗通用身体 ===== */
+  .pet-body {
+    position: relative;
+    width: 140px;
+    height: 120px;
+  }
+
+  /* 身体 */
+  .body-main {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 110px;
+    height: 80px;
+    background: linear-gradient(145deg, #ffcc80, #ffa726);
+    border-radius: 55px 55px 45px 45px;
+    box-shadow: inset -8px -8px 20px rgba(0,0,0,0.1), 0 8px 20px rgba(0,0,0,0.15);
+  }
+
+  /* 肚子 */
+  .belly {
+    position: absolute;
+    bottom: 5px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 60px;
+    height: 45px;
+    background: linear-gradient(to bottom, #fff59d, #ffee58);
+    border-radius: 50%;
+  }
+
+  /* 头部 */
+  .head {
+    position: absolute;
+    top: -55px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 100px;
+    height: 90px;
+    background: linear-gradient(145deg, #ffcc80, #ffa726);
+    border-radius: 50% 50% 45% 45%;
+    box-shadow: inset -6px -6px 15px rgba(0,0,0,0.08), 0 6px 15px rgba(0,0,0,0.12);
+  }
+
+  /* 耳朵 */
+  .ear {
+    position: absolute;
+    top: -18px;
+    width: 0;
+    height: 0;
+    border-left: 18px solid transparent;
+    border-right: 18px solid transparent;
+    border-bottom: 28px solid #ffcc80;
+  }
+  .ear.left { left: 8px; transform: rotate(-15deg); }
+  .ear.right { right: 8px; transform: rotate(15deg); }
+  .ear-inner {
+    position: absolute;
+    top: 5px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 10px solid transparent;
+    border-right: 10px solid transparent;
+    border-bottom: 16px solid #ffb6c1;
+  }
+
+  /* 脸部花纹 */
+  .face-markings {
+    position: absolute;
+    top: 35px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 70px;
+    height: 40px;
+  }
+  .eye-patch {
+    position: absolute;
+    width: 22px;
+    height: 18px;
+    background: #5d4037;
+    border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+    top: 0;
+  }
+  .eye-patch.left { left: 10px; transform: rotate(-10deg); }
+  .eye-patch.right { right: 10px; transform: rotate(10deg); }
+
+  /* 眼睛 */
+  .eye {
+    position: absolute;
+    top: 42px;
+    width: 22px;
+    height: 24px;
+    background: white;
+    border-radius: 50%;
+    box-shadow: inset 0 -2px 4px rgba(0,0,0,0.1);
+    overflow: hidden;
+  }
+  .eye.left { left: 18px; }
+  .eye.right { right: 18px; }
+  .pupil {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 12px;
+    height: 14px;
+    background: #1a1a2e;
+    border-radius: 50%;
+    transition: all 0.3s;
+  }
+  .pupil::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 4px;
+    height: 4px;
+    background: white;
+    border-radius: 50%;
+  }
+
+  /* 眨眼动画 */
+  .eye.blink {
+    animation: blink 3s infinite;
+  }
+  @keyframes blink {
+    0%, 90%, 100% { transform: scaleY(1); }
+    95%      { transform: scaleY(0.1); }
+  }
+
+  /* 鼻子 */
+  .nose {
+    position: absolute;
+    top: 62px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 14px;
+    height: 10px;
+    background: #ff8a80;
+    border-radius: 50% 50% 50% 50% / 30% 30% 70% 70%;
+  }
+
+  /* 嘴巴 */
+  .mouth {
+    position: absolute;
+    top: 68px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 20px;
+    height: 10px;
+    border: 2px solid #5d4037;
+    border-top: none;
+    border-radius: 0 0 50% 50%;
+    background: transparent;
+  }
+
+  /* 腮红 */
+  .blush {
+    position: absolute;
+    top: 55px;
+    width: 16px;
+    height: 8px;
+    background: rgba(255, 138, 128, 0.5);
+    border-radius: 50%;
+  }
+  .blush.left { left: 8px; }
+  .blush.right { right: 8px; }
+
+  /* 腿 */
+  .leg {
+    position: absolute;
+    bottom: -15px;
+    width: 22px;
+    height: 35px;
+    background: linear-gradient(to bottom, #ffcc80, #ffa726);
+    border-radius: 10px 10px 12px 12px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  }
+  .leg.front-left { left: 18px; }
+  .leg.front-right { right: 18px; }
+  .leg.back-left { left: 35px; }
+  .leg.back-right { right: 35px; }
+
+  /* 尾巴 */
+  .tail {
+    position: absolute;
+    bottom: 10px;
+    right: -25px;
+    width: 50px;
+    height: 14px;
+    background: linear-gradient(to right, #ffcc80, #ffa726);
+    border-radius: 10px;
+    transform-origin: left center;
+    animation: wagTail 0.5s ease-in-out infinite alternate;
+  }
+  @keyframes wagTail {
+    0%   { transform: rotate(-20deg); }
+    100% { transform: rotate(20deg); }
+  }
+
+  /* 项圈 */
+  .collar {
+    position: absolute;
+    top: -10px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 70px;
+    height: 12px;
+    background: linear-gradient(to bottom, #e91e63, #c2185b);
+    border-radius: 6px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+  }
+  .collar-bell {
+    position: absolute;
+    top: -2px;
+    right: 8px;
+    width: 12px;
+    height: 12px;
+    background: gold;
+    border-radius: 50%;
+    box-shadow: 0 0 6px rgba(255, 215, 0, 0.6);
+    animation: bellRing 2s ease-in-out infinite;
+  }
+  @keyframes bellRing {
+    0%, 100% { transform: translateX(0); }
+    50%      { transform: translateX(2px); }
+  }
+
+  /* ===== 互动按钮 ===== */
+  .controls {
+    margin-top: 30px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .btn {
+    padding: 12px 24px;
+    border: none;
+    border-radius: 25px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    color: white;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  }
+  .btn-cat { background: linear-gradient(135deg, #ff9800, #f57c00); }
+  .btn-dog { background: linear-gradient(135deg, #4caf50, #388e3c); }
+  .btn-both { background: linear-gradient(135deg, #9c27b0, #7b1fa2); }
+  .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.2); }
+  .btn:active { transform: translateY(0); }
+
+  /* ===== 标题 ===== */
+  h1 {
+    font-size: 2em;
+    color: #5d4037;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 10px;
+  }
+
+  /* ===== 爱心特效 ===== */
+  .heart {
+    position: absolute;
+    font-size: 24px;
+    animation: heartFloat 2s ease-out forwards;
+    pointer-events: none;
+  }
+  @keyframes heartFloat {
+    0%   { opacity: 1; transform: translateY(0) scale(0.5); }
+    100% { opacity: 0; transform: translateY(-80px) scale(1.2); }
+  }
+
+  /* ===== 点击提示 ===== */
+  .tip {
+    margin-top: 15px;
+    font-size: 14px;
+    color: #666;
+    animation: fadeInOut 3s ease-in-out infinite;
+  }
+  @keyframes fadeInOut {
+    0%, 100% { opacity: 0.5; }
+    50%      { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<h1>🐱 可爱宠物乐园 🐶</h1>
+
+<div class="scene">
+  <div class="sun"></div>
+  <div class="cloud cloud-1"></div>
+  <div class="cloud cloud-2"></div>
+  <div class="ground"></div>
+
+  <div class="pet-container" id="petContainer">
+    <div class="pet-body" id="petBody">
+      <!-- 尾巴 -->
+      <div class="tail"></div>
+
+      <!-- 后腿 -->
+      <div class="leg back-left"></div>
+      <div class="leg back-right"></div>
+
+      <!-- 身体 -->
+      <div class="body-main">
+        <div class="belly"></div>
+      </div>
+
+      <!-- 前腿 -->
+      <div class="leg front-left"></div>
+      <div class="leg front-right"></div>
+
+      <!-- 项圈 -->
+      <div class="collar">
+        <div class="collar-bell"></div>
+      </div>
+
+      <!-- 头 -->
+      <div class="head">
+        <div class="ear left"><div class="ear-inner"></div></div>
+        <div class="ear right"><div class="ear-inner"></div></div>
+        <div class="face-markings">
+          <div class="eye-patch left"></div>
+          <div class="eye-patch right"></div>
+        </div>
+        <div class="eye left"><div class="pupil" id="leftPupil"></div></div>
+        <div class="eye right"><div class="pupil" id="rightPupil"></div></div>
+        <div class="blush left"></div>
+        <div class="blush right"></div>
+        <div class="nose"></div>
+        <div class="mouth"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="btn btn-cat" onclick="switchPet('cat')">🐱 小橘猫</button>
+  <button class="btn btn-dog" onclick="switchPet('dog')">🐕 小黄狗</button>
+  <button class="btn btn-both" onclick="toggleBoth()">🎪 切换模式</button>
+</div>
+
+<p class="tip">💡 点击宠物可以投喂小鱼干/骨头哦~</p>
+
+<script>
+const petBody = document.getElementById('petBody');
+const leftPupil = document.getElementById('leftPupil');
+const rightPupil = document.getElementById('rightPupil');
+let isCat = true;
+let bothMode = false;
+
+// 鼠标跟随眼球
+document.addEventListener('mousemove', (e) => {
+  const rect = petBody.getBoundingClientRect();
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const angle = Math.atan2(e.clientY - centerY, e.clientX - centerX);
+  const distance = Math.min(4, Math.hypot(e.clientX - centerX, e.clientY - centerY) / 50);
+  
+  const offsetX = Math.cos(angle) * distance;
+  const offsetY = Math.sin(angle) * distance;
+  
+  leftPupil.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
+  rightPupil.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
+});
+
+// 点击投喂
+petBody.addEventListener('click', () => {
+  createHeart(event.clientX, event.clientY);
+});
+
+function createHeart(x, y) {
+  const heart = document.createElement('div');
+  heart.className = 'heart';
+  heart.textContent = ['❤️', '🐟', '🦴'][Math.floor(Math.random() * 3)];
+  heart.style.left = x + 'px';
+  heart.style.top = y + 'px';
+  document.body.appendChild(heart);
+  setTimeout(() => heart.remove(), 2000);
+}
+
+function switchPet(type) {
+  if (!isCat && type !== 'cat') return;
+  isCat = type === 'cat';
+  updateAppearance();
+}
+
+function toggleBoth() {
+  bothMode = !bothMode;
+  updateAppearance();
+}
+
+function updateAppearance() {
+  // 身体颜色
+  const bodyMain = petBody.querySelector('.body-main');
+  const head = petBody.querySelector('.head');
+  const ears = petBody.querySelectorAll('.ear');
+  const blushes = petBody.querySelectorAll('.blush');
+  const collar = petBody.querySelector('.collar');
+  const tail = petBody.querySelector('.tail');
+  const legs = petBody.querySelectorAll('.leg');
+  const eyePatches = petBody.querySelectorAll('.eye-patch');
+  const nose = petBody.querySelector('.nose');
+  const mouth = petBody.querySelector('.mouth');
+
+  if (bothMode) {
+    // 混合模式 - 猫的身体，狗的头
+    bodyMain.style.background = 'linear-gradient(145deg, #8d6e63, #6d4c41)';
+    head.style.background = 'linear-gradient(145deg, #ffcc80, #ffa726)';
+    collar.style.background = 'linear-gradient(to bottom, #4caf50, #388e3c)';
+    tail.style.background = 'linear-gradient(to right, #8d6e63, #6d4c41)';
+    nose.style.background = '#4caf50';
+    mouth.style.borderColor = '#4caf50';
+    legStyle(legs, '#8d6e63', '#6d4c41');
+    legStyle(ears, '#ffcc80', '#ffa726');
+    blushes.forEach(b => b.style.background = 'rgba(255, 138, 128, 0.5)');
+    eyePatches.forEach(ep => ep.style.background = '#5d4037');
+  } else if (isCat) {
+    // 猫咪
+    bodyMain.style.background = 'linear-gradient(145deg, #ffcc80, #ffa726)';
+    head.style.background = 'linear-gradient(145deg, #ffcc80, #ffa726)';
+    collar.style.background = 'linear-gradient(to bottom, #e91e63, #c2185b)';
+    tail.style.background = 'linear-gradient(to right, #ffcc80, #ffa726)';
+    nose.style.background = '#ff8a80';
+    mouth.style.borderColor = '#5d4037';
+    legStyle(legs, '#ffcc80', '#ffa726');
+    legStyle(ears, '#ffcc80', '#ffa726');
+    blushes.forEach(b => b.style.background = 'rgba(255, 138, 128, 0.5)');
+    eyePatches.forEach(ep => ep.style.background = '#5d4037');
+  } else {
+    // 狗狗
+    bodyMain.style.background = 'linear-gradient(145deg, #ffe0b2, #ffcc80)';
+    head.style.background = 'linear-gradient(145deg, #ffe0b2, #ffcc80)';
+    collar.style.background = 'linear-gradient(to bottom, #4caf50, #388e3c)';
+    tail.style.background = 'linear-gradient(to right, #ffe0b2, #ffcc80)';
+    nose.style.background = '#4caf50';
+    mouth.style.borderColor = '#4caf50';
+    legStyle(legs, '#ffe0b2', '#ffcc80');
+    legStyle(ears, '#ffe0b2', '#ffcc80');
+    blushes.forEach(b => b.style.background = 'rgba(255, 138, 128, 0.3)');
+    eyePatches.forEach(ep => ep.style.background = '#5d4037');
+  }
+}
+
+function legStyle(legs, color1, color2) {
+  legs.forEach(leg => {
+    leg.style.background = `linear-gradient(to bottom, ${color1}, ${color2})`;
+  });
+}
+
+// 随机眨眼
+setInterval(() => {
+  const eyes = petBody.querySelectorAll('.eye');
+  eyes.forEach(eye => eye.classList.add('blink'));
+  setTimeout(() => eyes.forEach(eye => eye.classList.remove('blink')), 300);
+}, 3000);
+</script>
+</body>
+</html>
